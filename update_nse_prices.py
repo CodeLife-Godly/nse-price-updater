@@ -53,10 +53,10 @@ def extract_ohlcv(quote: dict, printed_raw: bool):
 
     return {
         "open_price": quote.get("open"),
-        "high_price": quote.get("dayHigh"),
-        "low_price": quote.get("dayLow"),
-        "close_price": quote.get("lastPrice"),
-        "volume": quote.get("totalTradedVolume"),
+        "high_price": quote.get("high"),
+        "low_price": quote.get("low"),
+        "close_price": quote.get("close"),
+        "volume": quote.get("volume"),
     }
 
 
