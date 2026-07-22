@@ -1,10 +1,10 @@
-name: NSE Price Update
+name: NSE Price Update (Python)
 
 on:
   # NSE market hours: 9:15 AM - 3:30 PM IST = 3:45 AM - 10:00 AM UTC.
   # Window widened slightly with margin, every 15 min, Mon-Fri.
   schedule:
-    - cron: "*/30 3-10 * * 1-5"
+    - cron: "*/15 3-10 * * 1-5"
   workflow_dispatch:
 
 jobs:
@@ -16,16 +16,16 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          node-version: "22"
+          python-version: "3.12"
 
       - name: Install dependencies
-        run: npm install
+        run: pip install -r requirements.txt
 
       - name: Run NSE price update
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: npm run update
+        run: python update_nse_prices.py
