@@ -1,146 +1,117 @@
-import YahooFinance from "yahoo-finance2";
-import { createClient } from "@supabase/supabase-js";
-import dotenv from "dotenv";
+"""
+Updates NSE asset prices in Supabase using the `nse` library
+(BennyThadikaran/NseIndiaApi), which hits NSE's own official site directly
+and is explicitly confirmed to work from cloud/server environments
+(unlike Yahoo Finance scraping, which gets blocked from shared cloud IPs).
 
-// Runs on a schedule via GitHub Actions during NSE market hours.
-// Filtered to NSE-listed assets only.
+NSE's documented rate limit is 3 requests/second. We use a much more
+conservative ~1 request/second, comfortably under that limit.
 
-dotenv.config();
+Run: python update_nse_prices.py
+Requires: pip install "nse[server]" supabase python-dotenv
+"""
 
-const yahoo = new YahooFinance({
-    suppressNotices: ["yahooSurvey"]
-});
+import os
+import sys
+import time
+import tempfile
+from datetime import date
 
-const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+from supabase import create_client
+from dotenv import load_dotenv
+from nse import NSE
 
-async function updateNsePrices() {
+load_dotenv()
 
-    const { data: assets, error: assetError } = await supabase
-        .from("assets")
-        .select("id, symbol, provider_symbol, markets!inner(code)")
+DELAY_SECONDS = 1.0  # well under NSE's documented 3 req/sec limit
+
+supabase = create_client(
+    os.environ["SUPABASE_URL"],
+    os.environ["SUPABASE_SERVICE_ROLE_KEY"],
+)
+
+
+def fetch_nse_assets():
+    resp = (
+        supabase.table("assets")
+        .select("id, symbol, markets!inner(code)")
         .eq("markets.code", "NSE")
-        .eq("is_active", true);
+        .eq("is_active", True)
+        .execute()
+    )
+    return resp.data
 
-    if (assetError) {
-        throw assetError;
+
+def extract_ohlcv(quote: dict, printed_raw: bool):
+    """
+    Pulls OHLCV out of the equityQuote() response. Prints the raw dict
+    on the FIRST call only, so you can immediately verify the real key
+    names if extraction ever looks wrong, instead of debugging blind.
+    """
+    if not printed_raw:
+        print("  [debug] raw equityQuote response:", quote)
+
+    return {
+        "open_price": quote.get("open"),
+        "high_price": quote.get("dayHigh"),
+        "low_price": quote.get("dayLow"),
+        "close_price": quote.get("lastPrice"),
+        "volume": quote.get("totalTradedVolume"),
     }
 
-    console.log(`Found ${assets.length} NSE assets.`);
 
-    let success = 0;
-    let failed = 0;
+def main():
+    assets = fetch_nse_assets()
+    print(f"Found {len(assets)} NSE assets.")
 
-    console.time("NSE Price Update");
+    download_folder = tempfile.mkdtemp()
+    trading_date = date.today().isoformat()
 
-    const BATCH_SIZE = 5;
+    success = 0
+    failed = 0
+    printed_raw = False
 
-    for (let start = 0; start < assets.length; start += BATCH_SIZE) {
+    with NSE(download_folder=download_folder, server=True) as nse:
+        for i, asset in enumerate(assets, 1):
+            symbol = asset["symbol"]
+            print(f"[{i}/{len(assets)}] {symbol}...")
 
-        const batch = assets.slice(start, start + BATCH_SIZE);
+            try:
+                quote = nse.equityQuote(symbol)
+                ohlcv = extract_ohlcv(quote, printed_raw)
+                printed_raw = True
 
-        await Promise.all(
-
-            batch.map(async (asset, index) => {
-
-                console.log(
-                    `[${start + index + 1}/${assets.length}] ${asset.symbol}`
-                );
-
-                try {
-
-                    const quote = await yahoo.quote(
-                        asset.provider_symbol
-                    );
-
-                    if (!quote?.regularMarketPrice) {
-
-                        failed++;
-
-                        console.log(
-                            `✗ ${asset.symbol}: No market data`
-                        );
-
-                        return;
-
-                    }
-
-                    const tradingDate =
-                        quote.regularMarketTime
-                            .toISOString()
-                            .split("T")[0];
-
-                    const { error } = await supabase
-                        .from("asset_prices")
+                if ohlcv["close_price"] is None:
+                    failed += 1
+                    print(f"  ✗ {symbol}: no close price in response")
+                else:
+                    resp = (
+                        supabase.table("asset_prices")
                         .upsert(
                             {
-                                asset_id: asset.id,
-                                trading_date: tradingDate,
-                                open_price: quote.regularMarketOpen,
-                                high_price: quote.regularMarketDayHigh,
-                                low_price: quote.regularMarketDayLow,
-                                close_price: quote.regularMarketPrice,
-                                volume: quote.regularMarketVolume
+                                "asset_id": asset["id"],
+                                "trading_date": trading_date,
+                                **ohlcv,
                             },
-                            {
-                                onConflict: "asset_id,trading_date"
-                            }
-                        );
+                            on_conflict="asset_id,trading_date",
+                        )
+                        .execute()
+                    )
+                    success += 1
+                    print(f"  ✓ {symbol} ₹{ohlcv['close_price']}")
 
-                    if (error) {
+            except Exception as e:
+                failed += 1
+                print(f"  ✗ {symbol}: {e}")
 
-                        failed++;
+            time.sleep(DELAY_SECONDS)
 
-                        console.error(
-                            `✗ ${asset.symbol}: ${error.message}`
-                        );
+    print(f"\n====================================")
+    print(f"NSE Price Update Finished")
+    print(f"Success : {success}")
+    print(f"Failed  : {failed}")
+    print(f"====================================")
 
-                        return;
 
-                    }
-
-                    success++;
-
-                    console.log(
-                        `✓ ${asset.symbol} ₹${quote.regularMarketPrice}`
-                    );
-
-                }
-                catch (err) {
-
-                    failed++;
-
-                    console.error(
-                        `✗ ${asset.symbol}: ${err.message}`
-                    );
-
-                }
-
-            })
-
-        );
-
-        // Small pause between batches — gentler pacing for Yahoo,
-        // since this script is the one most exposed to scraping-block risk.
-        await new Promise((resolve) => setTimeout(resolve, 500));
-
-    }
-
-    console.timeEnd("NSE Price Update");
-
-    console.log(`
-====================================
-NSE Price Update Finished
-------------------------------------
-Success : ${success}
-Failed  : ${failed}
-====================================
-`);
-}
-
-updateNsePrices().catch((err) => {
-    console.error("Fatal error:", err);
-    process.exit(1);
-});
+if __name__ == "__main__":
+    main()
