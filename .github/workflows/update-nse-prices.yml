@@ -4,7 +4,7 @@ on:
   # NSE market hours: 9:15 AM - 3:30 PM IST = 3:45 AM - 10:00 AM UTC.
   # Window widened slightly with margin, every 15 min, Mon-Fri.
   schedule:
-    - cron: "*/15 3-10 * * 1-5"
+    - cron: "*/30 3-10 * * 1-5"
   workflow_dispatch:
 
 jobs:
